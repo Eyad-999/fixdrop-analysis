@@ -324,7 +324,6 @@ class Worker:
 		def _index(_n: int, _idx: int) -> list:
 			if _n!=_idx:
 				o[_idx].inc(1)
-				pprint('Index change:', _idx, _n, o[_n].keys)
 			return [_n,_n]
 
 		while True:
