@@ -9,30 +9,30 @@ from typing import Any
 from pymongo import MongoClient
 from pymemcache.client.base import Client
 
-import os
-import gzip
-import re
-import sys
-import json
-import math
-import zmq
-import random
-import time
-import base64
-import psutil
-import datetime
-import pytz
-import pathlib
-import subprocess
-import shlex
+import os, sys, re, subprocess, signal
+import gzip, json, math
+import zmq, random, time, datetime
+import base64, psutil
+import pytz, pathlib, shlex
 
 db_Host = 'mongodb.example.com'
 db_User = 'admin'
 db_Pass = '' # Leave blank for user input
 
+assert sys.version_info >= (3, 10)
 (list,selected) = ({0:False},0)
 (client,db,IO) = (False,False,0)
 threads = cpu_count()
+
+def handler(num, _) -> int | None:
+	if num == signal.SIGINT:
+		sys.exit(1)
+	return 1
+
+signames = ['SIGINT','SIGHUP','SIGQUIT','SIGUSR1']
+sigmap = dict((getattr(signal, k), k) for k in signames)
+for name in signames:
+	signal.signal(getattr(signal, name), handler)
 
 def number_format(num: int, dec: int) -> str:
 	return re.sub(r'^(\d+\.\d{,'+str(dec)+'})\d*$',r'\1',str(num))
@@ -292,10 +292,7 @@ class Worker:
 				process = 'subscriber'
 				p = Forwarder(process, parent, filter)
 				getattr(p, process)()
-				try:
-					Worker._parse_orders(p, parent)
-				except (KeyboardInterrupt) as e:
-					pass
+				Worker._parse_orders(p, parent)
 				raise SystemExit
 
 			case _:
@@ -457,8 +454,6 @@ class Forwarder:
 			zmq.device(zmq.FORWARDER, frontend, backend)
 		except (UnboundLocalError) as e:
 			pprint(color.RED + 'Bind error. Bringing down zmq device.' + color.END)
-		except (Exception, KeyboardInterrupt) as e:
-			pass
 		finally:
 			frontend.close()
 			backend.close()
@@ -498,10 +493,7 @@ class Forwarder:
 	def get(self, block: bool=True, fullText: bool=False) -> str:
 		(buffer,string) = ('','')
 		if block == True:
-			try:
-				string = self.socket.recv()
-			except (KeyboardInterrupt) as e:
-				pass
+			string = self.socket.recv()
 		else:
 			try:
 				string = self.socket.recv(flags=zmq.NOBLOCK)
@@ -950,18 +942,17 @@ if __name__ == '__main__':
 
 	if bindConflict() == True:
 		raise SystemExit
-	try:
-		run()			
-	except (KeyboardInterrupt) as e:
-		ppid = os.getpid()
-		for process in psutil.process_iter():
-			_ppid = process.ppid()
-			if _ppid == ppid:
-				_pid = process.pid
-				if sys.platform == 'win32':
-					process.terminate()
-				else:
-					os.system('kill -9 {0}'.format(_pid))
+	run()			
+
+	ppid = os.getpid()
+	for process in psutil.process_iter():
+		_ppid = process.ppid()
+		if _ppid == ppid:
+			_pid = process.pid
+			if sys.platform == 'win32':
+				process.terminate()
+			else:
+				os.system('kill -9 {0}'.format(_pid))
 	try:
 		sys.exit(0)
 	except SystemExit:
