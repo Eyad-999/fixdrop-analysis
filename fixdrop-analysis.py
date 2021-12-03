@@ -26,6 +26,7 @@ threads = cpu_count()
 
 def handler(num, _) -> int | None:
 	if num == signal.SIGINT:
+		print('\n')
 		sys.exit(1)
 	return 1
 
@@ -100,9 +101,9 @@ def pstats(o: list, n: int, br: bool=False, documents: list=False) -> None:
 	sys.stdout.write('Trades: ' + (color.BOLD if documents==False else match(o[0].r, documents[0])) + '{:,}'.format(o[0].r) + color.END + ', ')
 	sys.stdout.write('Orders: ' + (color.BOLD if documents==False else match(o[1].r, documents[1])) + '{:,}'.format(o[1].r) + color.END + ', ')
 	sys.stdout.write('Securities: ' + (color.BOLD if documents==False else match(o[2].r, documents[2])) + '{:,}'.format(o[2].r) + color.END + ', ')
-	sys.stdout.write('TransactTime: ' + (color.BOLD if documents==False else match(o[3].r, documents[1])) + TransactTime + color.END + ', ')
-	sys.stdout.write('OrderID: ' + (color.BOLD if documents==False else match(o[3].r, documents[1])) + '{:,}'.format(OrderID) + color.END + ', ')
-	sys.stdout.write('' if n == -1 else 'Reading: ' + color.BOLD + fsize(n) + color.END + ' (IO: ' + color.BOLD + '{:,}'.format(IO) + color.END + ')               ')
+	sys.stdout.write('TransactTime: ' + (color.BOLD if documents==False else match(o[3].r, documents[3])) + TransactTime + color.END + ', ')
+	sys.stdout.write('OrderID: ' + (color.BOLD if documents==False else match(o[3].r, documents[3])) + '{:,}'.format(OrderID) + color.END + ', ')
+	sys.stdout.write('' if n == -1 else 'Reading: ' + color.BOLD + fsize(n) + color.END + ' (IO: ' + color.BOLD + '{:,}'.format(IO) + color.END + ')                ')
 	sys.stdout.write('\r' if br == False else '\n')
 	sys.stdout.flush()
 
@@ -158,7 +159,8 @@ def tableKeys(table: str) -> list:
 			'DATE_LISTED','PERMANENTLY_DELISTED','CLASS_ID','MARKET_ID',
 			'SHORTABLE','ME_SERVER_ID','HALTED','MARKET_INDEX_ID',
 			'LISTED_COMPANY_ID','DIVIDEND_IND','ODD_LOT','SETTLEMENT_TERM',
-			'CHARGE_TIER','TICK_SZ_RULE','PRICE_THRESHOLD'],
+			'CHARGE_TIER','TICK_SZ_RULE','PRICE_THRESHOLD'
+		],
 		'MESSAGE':[
 			'CONNECTION_ID', 'SEQ_NO', 'MSG_BODY', 'MSG_TYPE', 'MSG_TIME'
 		]
@@ -361,18 +363,18 @@ class Worker:
 					o[idx].reset()
 					break
 				_VALUES = VALUES
-				VALUES, o = Worker._parse_sql(VALUES, o, idx)
+				VALUES = Worker._parse_sql(VALUES, o[idx])
 				if len(o[idx].get()) == len(o[idx].keys):
 					p.io.send(o[idx].table+" "+json.dumps(o[idx].get()))
 					p.io.send(json.dumps({'index':idx, 'table':o[idx].table, 'value':1}), parent)
 					o[idx].reset()
 
 	@staticmethod
-	def _parse_sql(VALUES: str, o: list, idx: int) -> list:
+	def _parse_sql(VALUES: str, data: Data) -> str:
 		if VALUES[0:1] == ';':
-			VALUES = o[idx].inc(1)
+			VALUES = data.inc(1)
 		elif VALUES[0:1] == "(" or VALUES[0:1] == ")":
-			o[idx].inc(1)
+			data.inc(1)
 			VALUES = VALUES[1:len(VALUES)-0]
 		elif VALUES[0:1] == "'":
 			VALUES = VALUES[1:len(VALUES)-0]
@@ -385,21 +387,21 @@ class Worker:
 					v = VALUES[0:VALUES.find("'", len(v)+1)]
 				VALUES = VALUES[len(str(v))+2:len(VALUES)-0]
 			VALUES = VALUES if VALUES[0:1] != ',' else VALUES[1:len(VALUES)-0]
-			o[idx].set(str(v) if v != 'NULL' else False)
-			o[idx].index(1)
+			data.set(str(v) if v != 'NULL' else False)
+			data.index(1)
 		else:
 			v = VALUES[0:VALUES.find(')')] if VALUES.find(',') == -1 else VALUES[0:VALUES.find(',')]
 			VALUES = VALUES[len(str(v))+1:len(VALUES)-0]
 			if v[len(str(v))-1:len(str(v))] == ')':
 				v = v[0:len(str(v))-1]
 			if str(v).find('.') > 0:
-				o[idx].set(float(v))
+				data.set(float(v))
 			elif str(v) == 'NULL':
-				o[idx].set(False)
+				data.set(False)
 			else:
-				o[idx].set(int(v))
-			o[idx].index(1)
-		return [VALUES, o]
+				data.set(int(v))
+			data.index(1)
+		return VALUES
 
 class Forwarder:
 	recv = ''
@@ -502,7 +504,7 @@ class Forwarder:
 		if len(string) > 0:
 			string = string.decode("utf-8")
 			self.recv = string
-			topic, buffer = string.split(' ', 1)
+			_, buffer = string.split(' ', 1)
 			if buffer == 'EXIT':
 				if self.io!=False and self.pid!=self.p:
 					self.io.send(str(self.pid) + ' Goodbye', self.p)
@@ -512,7 +514,7 @@ class Forwarder:
 		else:
 			return string if len(string) else ''
 
-	def stats(self, o: list) -> list:
+	def stats(self, o: list, tables: list) -> list:
 		global IO
 		string = 'A'
 		while len(string) > 0:
@@ -535,7 +537,8 @@ class Forwarder:
 
 			try:
 				if r['OrderID']:
-					IO = IO + 1
+					if int(r['IO']) == 0:
+						o[tables.index('MESSAGE')].r = o[tables.index('MESSAGE')].r - 1
 					try:
 						id = int(r['OrderID'][9:])
 					except (Exception) as e:
@@ -570,13 +573,20 @@ class Forwarder:
 			d = d.astimezone(pytz.utc)
 			return d.timestamp()
 
-		def query(obj: dict, table: str, r: dict={}) -> dict:
+		def query(obj: dict, table: str, r: dict=False) -> dict:
+			r = {} if r == False else r.copy()
 			if table == 'MESSAGE':
 				_FIX = obj['MSG_BODY'].split('|')
-				r = {'OrderID':False, 'Symbol':False, 'Side':False, 'OrdType':False, 'ExecType':False,
+				r = {
+					'OrderID':False, 'Symbol':False, 'Side':False, 'OrdType':False, 'ExecType':False,
 					'TransactTime':False, 'ExecuteTime':False, 'CloseTime':False,
-					'ClOrdID':False, 'OrigClOrdID':False, 'ExecBroker':False, 'TraderID':False, 'Orders':[]}
-				order = {'Price':False, 'OrderQty':False, 'LeavesQty':False, 'TransactTime':False, 'Text':False}
+					'ClOrdID':False, 'OrigClOrdID':False, 'ExecBroker':False, 'TraderID':False,
+					'Orders':[]
+				}
+				order = {
+					'OrderID':False, 'ClOrdID':False, 'OrigClOrdID':False,
+					'Price':False, 'OrderQty':False, 'LeavesQty':False, 'TransactTime':False, 'Text':False
+				}
 				for i in range(len(_FIX)):
 					if _FIX[i].find('=') == -1:
 						continue
@@ -603,14 +613,20 @@ class Forwarder:
 							r['TraderID'] = v
 						case '58':
 							order['Text'] = v
-							if v in ['New Order ACK','Order Replaced']:
+							order['OrderID'] = FIX['37']
+							order['ClOrdID'] = FIX['11']
+							try:
+								order['OrigClOrdID'] = FIX['41']
+							except (Exception) as e:
+								order['OrigClOrdID'] = False
+							if v in ['New Order ACK']:
 								r['TransactTime'] = unix_timestamp(order['TransactTime'])
 								try:
 									if len(str(FIX[150])) > 0:
 										r['ExecType'] = FIX[150]
 								except (Exception) as e:
 									pass
-							elif v in ['Pending Replace','Client Cancel','Exchange closed']:
+							elif v in ['Client Cancel']:
 								r['CloseTime'] = unix_timestamp(order['TransactTime'])
 							elif v in ['Order Fill','Partial Fill']:
 								r['ExecuteTime'] = unix_timestamp(order['TransactTime'])
@@ -656,7 +672,7 @@ class Forwarder:
 				continue
 
 			results = {'err':1}
-			topic, table, buffer = string.split(' ', 2)
+			_, table, buffer = string.split(' ', 2)
 			try:
 				o[table].data[o[table].r] = json.loads(buffer)
 				o[table].write()
@@ -666,9 +682,10 @@ class Forwarder:
 				(FIX,v) = ({},{})
 				r = query(json.loads(buffer), table)
 				if table == 'MESSAGE':
+					_i = 0
 					k = str(r['_id']) + '.' + str(self.pid)
 					if M.getInstance().get(k) == None:
-						s = Db.getInstance()[table+'_'+date].insert_one(r)
+						(_i,s) = (1,Db.getInstance()[table+'_'+date].insert_one(r))
 						M.getInstance().set(k, True, 86400)
 					else:
 						v = r.copy()
@@ -681,7 +698,7 @@ class Forwarder:
 						v = {'$set':v}
 						s = Db.getInstance()[table+'_'+date].update_one({'_id':r['_id']}, v)
 						M.getInstance().set(k, True, 86400)
-					results = {'OrderID':FIX['37'], 'TransactTime':FIX['60'] if r['TransactTime']!=False else False}
+					results = {'IO':_i, 'OrderID':FIX['37'], 'TransactTime':FIX['60'] if r['TransactTime']!=False else False}
 				else:
 					s = Db.getInstance()[table+'_'+date].insert_one(r)
 					results = {'IO':1}
@@ -745,6 +762,7 @@ class Build:
 		else:
 			# We will use the parent com thread
 			self.selected = int(os.environ.get('extractAll'))
+			selected = self.selected
 
 	def selectFile(self) -> list:
 		(i,files) = (0,os.listdir(self.path))
@@ -851,7 +869,7 @@ class Build:
 				utf8_in = buffer.decode('utf8', 'strict')
 				if len(utf8_in) > 0:
 					n = n + len(utf8_in)
-					o = workers.stats(o)
+					o = workers.stats(o, tables)
 					pstats(o, n)
 
 					for i in range(len(o)):
@@ -864,7 +882,7 @@ class Build:
 		time.sleep(1)
 		while s!=self.sum(o) or s!=str(IO):
 			s = self.sum(o)
-			o = workers.stats(o)
+			o = workers.stats(o, tables)
 			pstats(o, n)
 			time.sleep(1)
 
@@ -892,7 +910,7 @@ class Build:
 				err = err + 1
 				pprint(color.RED+o[i].table+' parsed value: '+str(o[i].r)+', database value: '+str(documents[i])+color.END)
 		if err > 0:
-			return self.extract()
+			return self.extract(date)
 		pprint('\n')
 		return True
 
@@ -903,9 +921,8 @@ class Build:
 			return
 
 	def analyze(self, date: str) -> None:
-		# Everything from this point is unfinished
-		pprint('Analyzing data ...')
-		self.book(date)
+		#pprint('Analyzing data ...')
+		#self.book(date)
 
 		#while True:
 		#	time.sleep(1)
