@@ -20,8 +20,8 @@ db_User = 'admin'
 db_Pass = '' # Leave blank for user input
 
 assert sys.version_info >= (3, 10)
-(list,selected) = ({0:False},0)
-(client,db,IO) = (False,False,0)
+(filelist,selected) = ({0:False},0)
+(client,db,IO,err,fp) = (False,False,0,0,None)
 threads = cpu_count()
 
 def handler(num, _) -> int | None:
@@ -35,7 +35,32 @@ sigmap = dict((getattr(signal, k), k) for k in signames)
 for name in signames:
 	signal.signal(getattr(signal, name), handler)
 
-def number_format(num: int, dec: int) -> str:
+class debug:
+	_start = None
+	f = None
+
+	@staticmethod
+	def str_repeat(string: str, times: int) -> str:
+		return (string * (int(times/len(string))+1))[:times] if times > 0 else ''
+
+	@staticmethod
+	def Timelog(data: str, state: bool=None):
+		if debug.f == None:
+			debug.f = open('/tmp/debug.timelog.txt', 'w')
+		if state == True:
+			debug._start = time.time()
+			t = str(datetime.datetime.now())
+			debug.f.write('['+t+debug.str_repeat(' ', 26-len(t))+'] PID:'+str(os.getpid())+' DATA:'+data+'\n')
+		elif state == None:
+			t = str(datetime.datetime.now())
+			debug.f.write('['+t+debug.str_repeat(' ', 26-len(t))+'] \t\t DATA:'+data+'\n')
+		else:
+			t = str(datetime.datetime.now())
+			e = str((time.time() - debug._start))
+			debug.f.write('['+t+debug.str_repeat(' ', 26-len(t))+'] Elapsed:'+e+' DATA:'+data+'\n')
+			debug._start = None
+
+def number_format(num: int | float, dec: int) -> str:
 	return re.sub(r'^(\d+\.\d{,'+str(dec)+'})\d*$',r'\1',str(num))
 
 def fsize(filePath: int | str) -> str:
@@ -85,8 +110,11 @@ def bindConflict() -> bool:
 def match(src: int | str, des: int | str) -> str:
 	return color.GREEN if src == des else color.RED
 
-def pstats(o: list, n: int, br: bool=False, documents: list=False) -> None:
-	(TransactTime,OrderID)=('...',0)
+def str_repeat(string: str, times: int) -> str:
+	return (string * (int(times/len(string))+1))[:times] if int > 0 else ''
+
+def pstats(o: list, n: int | list, br: bool=False, documents: list=False) -> None:
+	(TransactTime,OrderID,reading)=('...',0,True)
 	try:
 		if o[3].FIX['TransactTime'] != False:
 			TransactTime = o[3].FIX['TransactTime']
@@ -97,13 +125,29 @@ def pstats(o: list, n: int, br: bool=False, documents: list=False) -> None:
 			OrderID = int(o[3].FIX['OrderID'][9:])
 	except (Exception) as e:
 		pass
+	if isinstance(n, list):
+		n, reading = n
 	sys.stdout.write('  □ ')
 	sys.stdout.write('Trades: ' + (color.BOLD if documents==False else match(o[0].r, documents[0])) + '{:,}'.format(o[0].r) + color.END + ', ')
 	sys.stdout.write('Orders: ' + (color.BOLD if documents==False else match(o[1].r, documents[1])) + '{:,}'.format(o[1].r) + color.END + ', ')
 	sys.stdout.write('Securities: ' + (color.BOLD if documents==False else match(o[2].r, documents[2])) + '{:,}'.format(o[2].r) + color.END + ', ')
-	sys.stdout.write('TransactTime: ' + (color.BOLD if documents==False else match(o[3].r, documents[3])) + TransactTime + color.END + ', ')
-	sys.stdout.write('OrderID: ' + (color.BOLD if documents==False else match(o[3].r, documents[3])) + '{:,}'.format(OrderID) + color.END + ', ')
-	sys.stdout.write('' if n == -1 else 'Reading: ' + color.BOLD + fsize(n) + color.END + ' (IO: ' + color.BOLD + '{:,}'.format(IO) + color.END + ')                ')
+	if OrderID > 0:
+		sys.stdout.write('TransactTime: ' + (color.BOLD if documents==False else match(o[3].r, documents[3])) + TransactTime + color.END + ', ')
+		sys.stdout.write('OrderID: ' + (color.BOLD if documents==False else match(o[3].r, documents[3])) + '{:,}'.format(OrderID) + color.END + ', ')
+	sys.stdout.write('' if n == -1 else 'Reading: ' + (color.BOLD if reading else color.GREEN) + fsize(n) + color.END + ' (IO: ' + color.BOLD + '{:,}'.format(IO) + color.END+'')
+	if err > 0:
+		sys.stdout.write(', ' + color.RED + 'Error: '+'{:,}'.format(err) + color.END)
+	sys.stdout.write(')                ')
+	sys.stdout.write('\r' if br == False else '\n')
+	sys.stdout.flush()
+
+def bstats(docs: int, n: int, br: bool=False):
+	perc = math.ceil((n / docs) * 100)
+	sys.stdout.write('  □ ')
+	sys.stdout.write('Building order book |')
+	sys.stdout.write(str_repeat('█', perc))
+	sys.stdout.write(str_repeat('░', 100 - perc))
+	sys.stdout.write('| '+number_format((n / docs) * 100, 2)+'%')
 	sys.stdout.write('\r' if br == False else '\n')
 	sys.stdout.flush()
 
@@ -231,6 +275,48 @@ class M:
 			M.__instance.close()
 			M.__instance = None
 
+class getQuery:
+	@staticmethod
+	def new_order_extended() -> list:
+		query = {}
+		query["$and"] = [
+			{
+				u"TransactTime": {
+					u"$ne": False
+				}
+			},
+			{
+				u"TransactTime": {
+					u"$gt": 0.0
+				}
+			},
+			{
+				u"CloseTime": False
+			},
+			{
+				u"OrigClOrdID": False
+			}
+		]
+		projection = {}
+		projection["TransactTime"] = 1.0
+		projection["ExecuteTime"] = 1.0
+		projection["CloseTime"] = 1.0
+		projection["ClOrdID"] = 1.0
+		projection["Orders"] = 1.0
+		return [query, projection]
+
+	def order_attached(ClOrdID: str) -> list:
+		query = {}
+		query["ExecType"] = False
+		query["Orders.OrigClOrdID"] = u""+ClOrdID
+		projection = {}
+		projection["TransactTime"] = 1.0
+		projection["ExecuteTime"] = 1.0
+		projection["CloseTime"] = 1.0
+		projection["ClOrdID"] = 1.0
+		projection["Orders"] = 1.0
+		return [query, projection]
+
 class FIX44:
 	@staticmethod
 	def order_side(val: str) -> str:
@@ -271,6 +357,31 @@ class FIX44:
 			'L':'Previous Fund Valuation Point',
 			'M':'Next Fund Valuation Point',
 			'P':'Pegged'
+		}
+		return switcher.get(val, val)
+	
+	@staticmethod
+	def exec_type(val: str) -> str:
+		switcher={
+			'0':'New',
+			'1':'Partial fill',
+			'2':'Fill',
+			'3':'Done for day',
+			'4':'Canceled',
+			'5':'Replaced',
+			'6':'Pending Cancel',
+			'7':'Stopped',
+			'8':'Rejected',
+			'9':'Suspended',
+			'A':'Pending New',
+			'B':'Calculated',
+			'C':'Expired',
+			'D':'Restated',
+			'E':'Pending Replace',
+			'F':'Trade',
+			'G':'Trade Correct',
+			'H':'Trade Cancel',
+			'I':'Order Status'
 		}
 		return switcher.get(val, val)
 
@@ -404,7 +515,7 @@ class Worker:
 		return VALUES
 
 class Forwarder:
-	recv = ''
+	(w,recv) = ({},'')
 	(p,m,f,pid,io) = (0,'',0,0,False)
 	(context,socket) = (False,False)
 	def __init__(self, Process: str, Parent: int, Filter: str | int=0) -> None:
@@ -473,8 +584,10 @@ class Forwarder:
 		self.socket = self.context.socket(zmq.SUB)
 		self.socket.connect("tcp://localhost:%s" % port)
 		if self.f == self.p:
+			M.getInstance().delete('FP', True)
 			self.socket.setsockopt_string(zmq.SUBSCRIBE, 'P')
 		else:
+			M.getInstance().delete('F'+str(self.f), True)
 			self.socket.setsockopt_string(zmq.SUBSCRIBE, str(self.f))
 
 		self.io = Forwarder('server', self.p, 0)
@@ -489,6 +602,19 @@ class Forwarder:
 			else:
 				topic = 0 if t==None or t==self.f else t
 
+		try:
+			self.w['F'+str(topic)]
+		except (Exception) as e:
+			self.w['F'+str(topic)] = 0
+		t = math.ceil(time.time())
+		if t > self.w['F'+str(topic)]:
+			q = int(M.getInstance().get('F'+str(topic), 0))
+			if q < 250:
+				self.w['F'+str(topic)] = t + 3
+			else:
+				while int(M.getInstance().get('F'+str(topic), 0)) > 250:
+					time.sleep(0.15)
+		M.getInstance().incr('F'+str(topic), 1, True)
 		self.socket.send_string("%s %s" % (str(topic), buffer))
 	
 	def get(self, block: bool=True, fullText: bool=False) -> str:
@@ -504,7 +630,8 @@ class Forwarder:
 		if len(string) > 0:
 			string = string.decode("utf-8")
 			self.recv = string
-			_, buffer = string.split(' ', 1)
+			topic, buffer = string.split(' ', 1)
+			M.getInstance().decr('F'+str(topic), 1, True)
 			if buffer == 'EXIT':
 				if self.io!=False and self.pid!=self.p:
 					self.io.send(str(self.pid) + ' Goodbye', self.p)
@@ -515,7 +642,7 @@ class Forwarder:
 			return string if len(string) else ''
 
 	def stats(self, o: list, tables: list) -> list:
-		global IO
+		global IO, err
 		string = 'A'
 		while len(string) > 0:
 			string = self.get(False)
@@ -526,6 +653,11 @@ class Forwarder:
 			try:
 				if r['IO'] != None:
 					IO = IO + int(r['IO'])
+			except (Exception) as e:
+				pass
+			try:
+				if r['err'] != None:
+					err = err + int(r['err'])
 			except (Exception) as e:
 				pass
 
@@ -552,8 +684,8 @@ class Forwarder:
 		return o
 
 	def write(self) -> None:
-		date = list[selected].split('.',3)[2].split('-',1)[0]
-		fName='/tmp/'+list[selected][7:-7]+'--%s.json'
+		date = filelist[selected].split('.',3)[2].split('-',1)[0]
+		fName='/tmp/'+filelist[selected][7:-7]+'--%s.json'
 		o = {
 			'TRADE':Data('TRADE', [], fName),
 			'FIX_ORDER':Data('FIX_ORDER', [], fName),
@@ -620,18 +752,16 @@ class Forwarder:
 							except (Exception) as e:
 								order['OrigClOrdID'] = False
 							if v in ['New Order ACK']:
+								r['ClOrdID'] = FIX['11']
+								r['OrigClOrdID'] = False
 								r['TransactTime'] = unix_timestamp(order['TransactTime'])
-								try:
-									if len(str(FIX[150])) > 0:
-										r['ExecType'] = FIX[150]
-								except (Exception) as e:
-									pass
+								r['ExecType'] = FIX44.exec_type(FIX['150'])
 							elif v in ['Client Cancel']:
 								r['CloseTime'] = unix_timestamp(order['TransactTime'])
 							elif v in ['Order Fill','Partial Fill']:
 								r['ExecuteTime'] = unix_timestamp(order['TransactTime'])
 						case '150':
-							order['ExecType'] = v
+							order['ExecType'] = FIX44.exec_type(v)
 						case '44':
 							order['Price'] = float(v)
 						case '38':
@@ -642,6 +772,7 @@ class Forwarder:
 							order['LastQty'] = int(v)
 						case '60':
 							order['TransactTime'] = v
+							order['UnixTimestamp'] = unix_timestamp(v)
 				r['Orders'].append(order)
 				if r['OrderID'] != False:
 					M.getInstance().set('Orders.' + r['OrderID'] + '.' + str(self.pid), r['Orders'], 86400)
@@ -701,7 +832,7 @@ class Forwarder:
 					results = {'IO':_i, 'OrderID':FIX['37'], 'TransactTime':FIX['60'] if r['TransactTime']!=False else False}
 				else:
 					s = Db.getInstance()[table+'_'+date].insert_one(r)
-					results = {'IO':1}
+					results = {'IO':1, 'table':table}
 			except (Exception, TypeError) as e:
 				pprint('\n' + color.RED + 'Database Error:', e, color.END)
 				pprint(color.YELLOW + 'Query:', json.dumps(r, indent=4, sort_keys=True), color.END)
@@ -753,7 +884,7 @@ class Data:
 		self.k = x if x == 0 else self.k + x
 
 class Build:
-	(path,list,selected,tables) = ('/dumps',{0:False},0,[])
+	(path,filelist,selected,tables) = ('/dumps',{0:False},0,[])
 
 	def __init__(self) -> None:
 		if os.environ.get('extractAll') == None:
@@ -773,7 +904,7 @@ class Build:
 				continue
 
 			i = i + 1
-			self.list[i] = self.path + '/' + item
+			self.filelist[i] = self.path + '/' + item
 			pprint(str(i) + '): ' + item + ' (' + fsize(self.path + '/' + item) + ')')
 
 		pprint(color.CYAN+'A): Process all files'+color.END)
@@ -783,7 +914,7 @@ class Build:
 			n = input('Select file: ')
 			if n == 'A':
 				break
-			if int(n) in self.list and self.list[int(n)]:
+			if int(n) in self.filelist and self.filelist[int(n)]:
 				self.selected = int(n)
 
 		if n =='A':
@@ -791,11 +922,11 @@ class Build:
 			for i in range(1,len(list)):
 				os.environ['extractAll'] = i
 				run_command(pathlib.Path(__file__))
-			return [self.list, 0]
+			return [self.filelist, 0]
 
 		pprint('\n')
-		pprint('Processing:', self.list[self.selected], '...')
-		return [self.list, self.selected]
+		pprint('Processing:', self.filelist[self.selected], '...')
+		return [self.filelist, self.selected]
 
 	def sum(self, o: list) -> str:
 		(r,self.tables) = (0,[])
@@ -842,7 +973,6 @@ class Build:
 		if documents != False:
 			for i in range(len(tables)):
 				o[i].r = documents[i]
-			pstats(o, -1, True)
 			answer = '' if os.environ.get('extractAll') == None else 'y'
 			while answer not in ['y','N']:
 				answer = input('Data already exists. Would you like to use the saved data? [y/N]: ')
@@ -856,7 +986,7 @@ class Build:
 				return True
 		
 		(workers,n) = (Worker.fork('orders_trades'),0)
-		with gzip.open(self.list[self.selected], 'rb') as fp:
+		with gzip.open(self.filelist[self.selected], 'rb') as fp:
 			for buffer in fp:
 				if timeStamp != str(time.time()).split('.',1)[0]:
 					while float(psutil.virtual_memory()[2]) > 90:
@@ -879,11 +1009,12 @@ class Build:
 
 		s = ''
 		fp.close()
+		fp = None
 		time.sleep(1)
 		while s!=self.sum(o) or s!=str(IO):
 			s = self.sum(o)
 			o = workers.stats(o, tables)
-			pstats(o, n)
+			pstats(o, [n, False])
 			time.sleep(1)
 
 		for i in range(threads+1):
@@ -901,35 +1032,99 @@ class Build:
 
 		if documents == False:
 			pprint('\n'+color.RED+'Error building data'+color.END)
-			pstats(o, n, True)
+			pstats(o, [n, False], True)
 			return False
 			
-		pstats(o, n, True, documents)
+		pstats(o, [n, False], True, documents)
 		for i in range(len(o)):
 			if o[i].r != documents[i]:
 				err = err + 1
 				pprint(color.RED+o[i].table+' parsed value: '+str(o[i].r)+', database value: '+str(documents[i])+color.END)
 		if err > 0:
 			return self.extract(date)
-		pprint('\n')
 		return True
 
 	def book(self, date: str) -> None:
-		global IO
-		(table,IO) = ('MESSAGE',0)
+		global IO, err
+		(table,IO,err) = ('MESSAGE',0,0)
 		if Db.getInstance().list_collection_names(filter={'name':table+'_'+date}) == []:
 			return
+		query, projection = getQuery.new_order_extended()
+		(docs,q) = (0,Db.getInstance()[table+'_'+date].find(query, projection = projection))
+		try:
+			(n,s) = (0,q.explain())
+			if s['ok']:
+				docs = s['executionStats']['nReturned']
+		except (Exception) as e:
+			pass
+
+		def setExecuteTime(time: float | bool) -> None:
+			if time == False:
+				return
+			if order['ExecuteTime'] == False:
+				order['ExecuteTime'] = time
+				return
+			if time > order['ExecuteTime']:
+				order['ExecuteTime'] = time
+			return
+
+		def setCloseTime(time: float | bool) -> None:
+			if time == False:
+				return
+			if order['CloseTime'] == False:
+				order['CloseTime'] = time
+				return
+			if time > order['CloseTime']:
+				order['CloseTime'] = time
+			return
+
+		if docs > 0:
+			for d in q:
+				n = n + 1
+				bstats(docs, n)
+				order = d.copy()
+				(ClOrdID,edocs,rm) = ([order['ClOrdID']],1,[])
+				for OrdID in ClOrdID:
+					query, projection = getQuery.order_attached(OrdID)
+					(edocs,eq) = (0,Db.getInstance()[table+'_'+date].find(query, projection = projection))
+					try:
+						s = eq.explain()
+						edocs = s['executionStats']['nReturned'] if s['ok'] else 0
+					except (Exception) as e:
+						pass
+					if edocs == 0:
+						continue
+					for ed in eq:
+						e_order = ed.copy()
+						rm.append(e_order['_id'])
+						setExecuteTime(e_order['ExecuteTime'])
+						setCloseTime(e_order['CloseTime'])
+						for ord in e_order['Orders']:
+							if ord['ClOrdID'] not in ClOrdID:
+								ClOrdID.append(ord['ClOrdID'])
+							order['Orders'].append(ord)
+				v = order.copy()
+				v.pop('_id', None)
+				try:
+					Db.getInstance()[table+'_'+date].update_one({'_id':order['_id']}, {'$set':v})
+					if len(rm) > 0:
+						Db.getInstance()[table+'_'+date].delete_one({'_id':{'$in':rm}})
+				except (Exception, TypeError) as e:
+					pprint('\n' + color.RED + 'Database Error:', e, color.END)
+					pprint(color.YELLOW + 'Update:', {'_id':order['_id']}, json.dumps(v, indent=4, sort_keys=True), color.END)
+					pprint(color.YELLOW + 'Delete:', json.dumps({'_id':{'$in':rm}}, indent=4, sort_keys=True), color.END)
+					err = err + 1
+		bstats(docs, n, True)
 
 	def analyze(self, date: str) -> None:
-		#pprint('Analyzing data ...')
-		#self.book(date)
+		self.book(date)
 
 		#while True:
 		#	time.sleep(1)
 
 if __name__ == '__main__':
 	def run() -> None:
-		global db_Pass, list, selected, IO
+		global db_Pass, filelist, selected, IO
 
 		IO = 0
 		if len(db_User) > 0 and len(db_Pass) == 0:
@@ -948,10 +1143,10 @@ if __name__ == '__main__':
 						break
 
 		b = Build()
-		list, selected = b.selectFile()
+		filelist, selected = b.selectFile()
 		if selected == 0:
 			return
-		date = b.list[b.selected].split('.',3)[2].split('-',1)[0]
+		date = b.filelist[b.selected].split('.',3)[2].split('-',1)[0]
 		if b.extract(date) == True:
 			if os.environ.get('extractAll') == None:
 				b.analyze(date)
