@@ -21,12 +21,15 @@ db_Pass = '' # Leave blank for user input
 
 assert sys.version_info >= (3, 10)
 (filelist,selected) = ({0:False},0)
-(client,db,IO,err,fp) = (False,False,0,0,None)
-threads = cpu_count()
+(client,db,inputOutput,err) = (False,False,0,0)
+(appnd,ppid,threads) = (0,os.getpid(),cpu_count())
 
 def handler(num, _) -> int | None:
 	if num == signal.SIGINT:
-		print('\n')
+		if os.getpid() == ppid:
+			print('\n')
+		Db.disconnect()
+		M.disconnect()
 		sys.exit(1)
 	return 1
 
@@ -34,31 +37,6 @@ signames = ['SIGINT','SIGHUP','SIGQUIT','SIGUSR1']
 sigmap = dict((getattr(signal, k), k) for k in signames)
 for name in signames:
 	signal.signal(getattr(signal, name), handler)
-
-class debug:
-	_start = None
-	f = None
-
-	@staticmethod
-	def str_repeat(string: str, times: int) -> str:
-		return (string * (int(times/len(string))+1))[:times] if times > 0 else ''
-
-	@staticmethod
-	def Timelog(data: str, state: bool=None):
-		if debug.f == None:
-			debug.f = open('/tmp/debug.timelog.txt', 'w')
-		if state == True:
-			debug._start = time.time()
-			t = str(datetime.datetime.now())
-			debug.f.write('['+t+debug.str_repeat(' ', 26-len(t))+'] PID:'+str(os.getpid())+' DATA:'+data+'\n')
-		elif state == None:
-			t = str(datetime.datetime.now())
-			debug.f.write('['+t+debug.str_repeat(' ', 26-len(t))+'] \t\t DATA:'+data+'\n')
-		else:
-			t = str(datetime.datetime.now())
-			e = str((time.time() - debug._start))
-			debug.f.write('['+t+debug.str_repeat(' ', 26-len(t))+'] Elapsed:'+e+' DATA:'+data+'\n')
-			debug._start = None
 
 def number_format(num: int | float, dec: int) -> str:
 	return re.sub(r'^(\d+\.\d{,'+str(dec)+'})\d*$',r'\1',str(num))
@@ -111,7 +89,7 @@ def match(src: int | str, des: int | str) -> str:
 	return color.GREEN if src == des else color.RED
 
 def str_repeat(string: str, times: int) -> str:
-	return (string * (int(times/len(string))+1))[:times] if int > 0 else ''
+	return (string * (int(times/len(string))+1))[:times] if times > 0 else ''
 
 def pstats(o: list, n: int | list, br: bool=False, documents: list=False) -> None:
 	(TransactTime,OrderID,reading)=('...',0,True)
@@ -134,17 +112,17 @@ def pstats(o: list, n: int | list, br: bool=False, documents: list=False) -> Non
 	if OrderID > 0:
 		sys.stdout.write('TransactTime: ' + (color.BOLD if documents==False else match(o[3].r, documents[3])) + TransactTime + color.END + ', ')
 		sys.stdout.write('OrderID: ' + (color.BOLD if documents==False else match(o[3].r, documents[3])) + '{:,}'.format(OrderID) + color.END + ', ')
-	sys.stdout.write('' if n == -1 else 'Reading: ' + (color.BOLD if reading else color.GREEN) + fsize(n) + color.END + ' (IO: ' + color.BOLD + '{:,}'.format(IO) + color.END+'')
+	sys.stdout.write('' if n == -1 else 'Reading: ' + (color.BOLD if reading else color.GREEN) + fsize(n) + color.END + ' (IO: ' + color.BOLD + '{:,}'.format(inputOutput) + color.END+'')
 	if err > 0:
 		sys.stdout.write(', ' + color.RED + 'Error: '+'{:,}'.format(err) + color.END)
 	sys.stdout.write(')                ')
 	sys.stdout.write('\r' if br == False else '\n')
 	sys.stdout.flush()
 
-def bstats(docs: int, n: int, br: bool=False):
+def bstats(txt: str, docs: int, n: int, br: bool=False):
 	perc = math.ceil((n / docs) * 100)
 	sys.stdout.write('  □ ')
-	sys.stdout.write('Building order book |')
+	sys.stdout.write(txt[0:19]+str_repeat(' ', 19-len(txt[0:19]))+' |')
 	sys.stdout.write(str_repeat('█', perc))
 	sys.stdout.write(str_repeat('░', 100 - perc))
 	sys.stdout.write('| '+number_format((n / docs) * 100, 2)+'%')
@@ -223,6 +201,31 @@ class color:
 	UNDERLINE = '\033[4m'
 	END = '\033[0m'
 
+class debug:
+	_start = None
+	f = None
+
+	@staticmethod
+	def str_repeat(string: str, times: int) -> str:
+		return (string * (int(times/len(string))+1))[:times] if times > 0 else ''
+
+	@staticmethod
+	def Timelog(data: str, state: bool=None):
+		if debug.f == None:
+			debug.f = open('/tmp/debug.timelog.'+str(os.getpid())+'.txt', 'a')
+		if state == True:
+			debug._start = time.time()
+			t = str(datetime.datetime.now())
+			debug.f.write('['+t+debug.str_repeat(' ', 26-len(t))+'] PID:'+str(os.getpid())+' DATA:'+data+'\n')
+		elif state == None:
+			t = str(datetime.datetime.now())
+			debug.f.write('['+t+debug.str_repeat(' ', 26-len(t))+'] \t\t DATA:'+data+'\n')
+		else:
+			t = str(datetime.datetime.now())
+			e = str((time.time() - debug._start))
+			debug.f.write('['+t+debug.str_repeat(' ', 26-len(t))+'] Elapsed:'+e+' DATA:'+data+'\n')
+			debug._start = None
+
 class JsonSerde(object):
 	def serialize(self, key, value):
 		if isinstance(value, str):
@@ -268,7 +271,14 @@ class M:
 		if M.__instance != None:
 			raise Exception("This class is a singleton!")
 		else:
-			M.__instance = Client('localhost', serde=JsonSerde())
+			base_client = Client('localhost', serde=JsonSerde())
+			M.__instance = RetryingClient(
+				base_client,
+				attempts=3,
+				retry_delay=0.01,
+				retry_for=[MemcacheUnexpectedCloseError]
+			)
+
 	@staticmethod
 	def disconnect():
 		if M.__instance != None:
@@ -387,7 +397,7 @@ class FIX44:
 
 class Worker:
 	@staticmethod
-	def start(process: str, parent: int, filter: str | int=0) -> None:
+	def start(process: str, parent: int, filter: str | int=0, thread: int=None) -> None:
 		match process:
 			case 'com':
 				process = 'device'
@@ -398,6 +408,7 @@ class Worker:
 			case 'io':
 				process = 'write'
 				p = Forwarder(process, parent, filter)
+				p.thread = thread if isinstance(thread, int) else None
 				getattr(p, process)()
 				raise SystemExit
 
@@ -417,8 +428,9 @@ class Worker:
 		for i in range(1,threads+1):
 			Process(target=Worker.start, args=(process, os.getpid(), i)).start()
 
-		# Start the I/O thread. Needed for the workers
-		Process(target=Worker.start, args=('io', os.getpid(), 0)).start()
+		# Start the I/O threads. Needed for the workers
+		for thread in range(threads*10):
+			Process(target=Worker.start, args=('io', os.getpid(), 0, thread)).start()
 
 		# Open communication with Forwarder ("com" thread)
 		workers = Forwarder('subscriber', os.getpid(), os.getpid())
@@ -428,18 +440,19 @@ class Worker:
 
 	@staticmethod
 	def _parse_orders(p: Forwarder, parent: int) -> None:
-		(o,v,n,idx,_idx) = ([
-			Data('TRADE', tableKeys('TRADE')),
-			Data('FIX_ORDER', tableKeys('FIX_ORDER')),
-			Data('SECURITY', tableKeys('SECURITY')),
-			Data('MESSAGE', tableKeys('MESSAGE'))
-		],'',0,0,0)
+		tables,indexes = index()
+		(o,v,n,idx,_idx) = ([],'',0,0,0)
+		for i in range(len(tables)):
+			o.append(Data(tables[i], tableKeys(tables[i])))
+			o[i].indexes = indexes[i]
+
 		def _index(_n: int, _idx: int) -> list:
 			if _n!=_idx:
 				o[_idx].inc(1)
 			return [_n,_n]
 
 		while True:
+			Worker._balancer(p)
 			string = p.get()
 			if len(string) == 0:
 				time.sleep(1)
@@ -476,6 +489,12 @@ class Worker:
 				_VALUES = VALUES
 				VALUES = Worker._parse_sql(VALUES, o[idx])
 				if len(o[idx].get()) == len(o[idx].keys):
+					if o[idx].table == 'MESSAGE':
+						tkn = str(ppid+appnd)+'.'+hashlib.md5(json.dumps(o[idx].get()).encode('utf-8')).hexdigest()
+						if M.getInstance().get(tkn) == True:
+							o[idx].reset()
+							continue
+						M.getInstance().add(tkn, True, 86400)
 					p.io.send(o[idx].table+" "+json.dumps(o[idx].get()))
 					p.io.send(json.dumps({'index':idx, 'table':o[idx].table, 'value':1}), parent)
 					o[idx].reset()
@@ -514,8 +533,22 @@ class Worker:
 			data.index(1)
 		return VALUES
 
+	@staticmethod
+	def _balancer(p: Forwarder) -> None:
+		queue = int(M.getInstance().get('F'+str(p.f), 0))
+		if queue < 10:
+			return
+		balance = math.floor(queue / threads)
+		for topic in range(1,threads+1):
+			q = int(M.getInstance().get('F'+str(topic), 0))
+			if q > 0 or topic == p.f:
+				continue
+			while balance < q:
+				p.send(p.get(), topic)
+				q = q + 1
+
 class Forwarder:
-	(w,recv) = ({},'')
+	(w,recv,thread) = ({},'',None)
 	(p,m,f,pid,io) = (0,'',0,0,False)
 	(context,socket) = (False,False)
 	def __init__(self, Process: str, Parent: int, Filter: str | int=0) -> None:
@@ -586,9 +619,11 @@ class Forwarder:
 		if self.f == self.p:
 			M.getInstance().delete('FP', True)
 			self.socket.setsockopt_string(zmq.SUBSCRIBE, 'P')
+			M.getInstance().set('FP', 0, 86400, False)
 		else:
 			M.getInstance().delete('F'+str(self.f), True)
 			self.socket.setsockopt_string(zmq.SUBSCRIBE, str(self.f))
+			M.getInstance().set('F'+str(self.f), 0, 86400, False)
 
 		self.io = Forwarder('server', self.p, 0)
 		self.io.server()
@@ -601,7 +636,6 @@ class Forwarder:
 				topic = 'P'
 			else:
 				topic = 0 if t==None or t==self.f else t
-
 		try:
 			self.w['F'+str(topic)]
 		except (Exception) as e:
@@ -614,7 +648,7 @@ class Forwarder:
 			else:
 				while int(M.getInstance().get('F'+str(topic), 0)) > 250:
 					time.sleep(0.15)
-		M.getInstance().incr('F'+str(topic), 1, True)
+		M.getInstance().incr('F'+str(topic), 1)
 		self.socket.send_string("%s %s" % (str(topic), buffer))
 	
 	def get(self, block: bool=True, fullText: bool=False) -> str:
@@ -631,7 +665,7 @@ class Forwarder:
 			string = string.decode("utf-8")
 			self.recv = string
 			topic, buffer = string.split(' ', 1)
-			M.getInstance().decr('F'+str(topic), 1, True)
+			M.getInstance().decr('F'+str(topic), 1)
 			if buffer == 'EXIT':
 				if self.io!=False and self.pid!=self.p:
 					self.io.send(str(self.pid) + ' Goodbye', self.p)
@@ -641,18 +675,18 @@ class Forwarder:
 		else:
 			return string if len(string) else ''
 
-	def stats(self, o: list, tables: list) -> list:
-		global IO, err
-		string = 'A'
+	def stats(self, o: list, tables: list) -> int:
+		global inputOutput, err
+		(decr,string) = (0,'A')
 		while len(string) > 0:
 			string = self.get(False)
 			if len(string) == 0:
-				return o
+				break
 
-			r = json.loads(string)
+			(decr,r) = (decr+1,json.loads(string))
 			try:
 				if r['IO'] != None:
-					IO = IO + int(r['IO'])
+					inputOutput = inputOutput + int(r['IO'])
 			except (Exception) as e:
 				pass
 			try:
@@ -660,7 +694,6 @@ class Forwarder:
 					err = err + int(r['err'])
 			except (Exception) as e:
 				pass
-
 			try:
 				if r['index'] != None:
 					o[r['index']].r = o[r['index']].r + int(r['value'])
@@ -681,17 +714,19 @@ class Forwarder:
 						o[3].FIX['TransactTime'] = r['TransactTime']
 			except (Exception) as e:
 				pass
-		return o
+			if decr == 100:
+				break
+		return decr
 
 	def write(self) -> None:
 		date = filelist[selected].split('.',3)[2].split('-',1)[0]
 		fName='/tmp/'+filelist[selected][7:-7]+'--%s.json'
-		o = {
-			'TRADE':Data('TRADE', [], fName),
-			'FIX_ORDER':Data('FIX_ORDER', [], fName),
-			'SECURITY':Data('SECURITY', [], fName),
-			'MESSAGE':Data('MESSAGE', [])
-		}
+		tables, _ = index()
+		o = {}
+		for table in tables:
+			if (self.thread == None or self.thread == 0) and os.path.isfile(fName % table) == True:
+				os.remove(fName % table)
+			o[table] = Data(table, [], fName)
 		tables,indexes = index()
 		ids = {}
 		for i in range(len(indexes)):
@@ -795,26 +830,53 @@ class Forwarder:
 				pass
 			return r
 
+		def purge() -> bool:
+			num = 0
+			for i in range(1,threads+1):
+				num = num + M.getInstance().get('F'+str(i), 0)
+			return True if num == 0 else False
+
+		def getData(topic: str | int=0) -> string:
+			if self.thread == None or self.thread == 0 or purge():
+				return self.get(True, True)
+			(e,l) = (time.time()+10,math.floor(250 / (threads*10)))
+			while int(M.getInstance().get('F'+str(topic), 0)) < l * self.thread:
+				time.sleep(1 + (self.thread / 10))
+				if time.time() > e:
+					break
+			return self.get(True, True)
+
 		self.subscriber()
 		while True:
-			string = self.get(True, True)
+			string = getData()
 			if len(string) == 0:
 				time.sleep(1)
 				continue
 
-			results = {'err':1}
+			tkn = str(ppid+appnd)+'.'+hashlib.md5(string.encode('utf-8')).hexdigest()
+			if M.getInstance().get(tkn) == None:
+				M.getInstance().add(tkn, self.pid, 86400, True)
+				if M.getInstance().get(tkn) != self.pid:
+					M.getInstance().incr('F'+str(self.f), 1)
+					tkn = None
+			else:
+				M.getInstance().incr('F'+str(self.f), 1)
+				tkn = None
+			if tkn == None:
+				continue
+
+			results = {'err':1, 'IO':0}
 			_, table, buffer = string.split(' ', 2)
 			try:
 				o[table].data[o[table].r] = json.loads(buffer)
-				o[table].write()
 			except (Exception) as e:
 				pprint('\n' + color.RED + 'Write Error:', e, color.END)
 			try:
-				(FIX,v) = ({},{})
+				(FIX,v,k) = ({},{},'test')
 				r = query(json.loads(buffer), table)
 				if table == 'MESSAGE':
 					_i = 0
-					k = str(r['_id']) + '.' + str(self.pid)
+					k = str(r['_id']) + '.' + str(ppid)
 					if M.getInstance().get(k) == None:
 						(_i,s) = (1,Db.getInstance()[table+'_'+date].insert_one(r))
 						M.getInstance().set(k, True, 86400)
@@ -833,13 +895,20 @@ class Forwarder:
 				else:
 					s = Db.getInstance()[table+'_'+date].insert_one(r)
 					results = {'IO':1, 'table':table}
+			except (DuplicateKeyError) as e:
+				M.getInstance().set(k, True, 86400)
+				if table == 'MESSAGE':
+					results = {'IO':0, 'table':table, 'OrderID':FIX['37'], 'TransactTime':FIX['60'] if r['TransactTime']!=False else False}
+				else:
+					results = {'IO':0, 'table':table}
 			except (Exception, TypeError) as e:
 				pprint('\n' + color.RED + 'Database Error:', e, color.END)
 				pprint(color.YELLOW + 'Query:', json.dumps(r, indent=4, sort_keys=True), color.END)
-		
+			o[table].write()
 			self.io.send(json.dumps(results), self.p)
 
 	def exit(self) -> None:
+		M.getInstance().close()
 		self.socket.close()
 		self.context.term()
 		if self.io != False:
@@ -852,11 +921,13 @@ class Data:
 	(table,keys,indexes) = ('',[],'')
 	(r,k,v,f) = (0,0,'',False)
 	(FIX,data) = ({},{r:{}})
+	dataFile = None
 
 	def __init__(self, table: str, keys: list, fName: str=False) -> None:
 		(self.table,self.keys) = (table,keys)
 		if fName != False:
-			self.f = open(fName % table, 'w')
+			self.dataFile = fName % table
+			self.f = open(self.dataFile, 'a')
 
 	def inc(self, x: int) -> str:
 		if len(self.get()) > 0:
@@ -879,6 +950,16 @@ class Data:
 	def write(self) -> None:
 		if self.f != False:
 			self.f.write(str(json.dumps(self.data[self.r]))+"\n")
+
+	def close(self) -> None:
+		if self.f != False:
+			self.f.close()
+			self.f = False
+		if self.dataFile:
+			with open(self.dataFile, 'rb') as f_in, gzip.open(self.dataFile+'.gz', 'wb') as f_out:
+				f_out.writelines(f_in)
+			if os.path.isfile(self.dataFile+'.gz') == True:
+				os.remove(self.dataFile)
 
 	def index(self, x: int) -> None:
 		self.k = x if x == 0 else self.k + x
@@ -962,7 +1043,8 @@ class Build:
 		return False
 
 	def extract(self, date: str) -> bool:
-		global IO
+		global inputOutput, appnd
+
 		(timeStamp,o)=('',[])
 		tables,indexes = index()
 		for i in range(len(tables)):
@@ -985,12 +1067,29 @@ class Build:
 			else:
 				return True
 		
-		(workers,n) = (Worker.fork('orders_trades'),0)
+		def getQueue() -> int:
+			num = M.getInstance().get('FP', 0)
+			for i in range(threads+1):
+				num = num + M.getInstance().get('F'+str(i), 0)
+			if inputOutput == 0:
+				return num
+			if num == 0:
+				time.sleep(3)
+				num = num + M.getInstance().get('FP', 0)
+			elif num == M.getInstance().get('F0', 0):
+				time.sleep(3)
+				if num == M.getInstance().get('F0', 0):
+					M.getInstance().set('F0', 0, 86400)
+			return num
+
+		(workers,n,inputOutput) = (Worker.fork('orders_trades'),0,0)
 		with gzip.open(self.filelist[self.selected], 'rb') as fp:
 			for buffer in fp:
 				if timeStamp != str(time.time()).split('.',1)[0]:
-					while float(psutil.virtual_memory()[2]) > 90:
-						time.sleep(1)
+					while float(psutil.virtual_memory()[2]) > 90 or getQueue() >= threads*200:
+						while workers.stats(o, tables) == 100:
+							pstats(o, n)
+						time.sleep(0.2)
 						pstats(o, n)
 					timeStamp = str(time.time()).split('.',1)[0]
 
@@ -999,7 +1098,7 @@ class Build:
 				utf8_in = buffer.decode('utf8', 'strict')
 				if len(utf8_in) > 0:
 					n = n + len(utf8_in)
-					o = workers.stats(o, tables)
+					workers.stats(o, tables)
 					pstats(o, n)
 
 					for i in range(len(o)):
@@ -1007,20 +1106,25 @@ class Build:
 							workers.io.send(base64.b64encode(utf8_in.encode('utf-8')).decode())
 							break
 
-		s = ''
+		(decr,s) = (0,'')
 		fp.close()
-		fp = None
 		time.sleep(1)
-		while s!=self.sum(o) or s!=str(IO):
+
+		while getQueue() > 0:
 			s = self.sum(o)
-			o = workers.stats(o, tables)
+			decr = workers.stats(o, tables)
 			pstats(o, [n, False])
-			time.sleep(1)
+			if decr == 0:
+				time.sleep(0.2)
 
 		for i in range(threads+1):
-			workers.io.send('EXIT', i)
+			if i == 0:
+				for _ in range(threads*10):
+					workers.io.send('EXIT', 0)
+			else:
+				workers.io.send('EXIT', i)
 		exits = 0
-		while exits < threads+1:
+		while exits < (threads*10)+1:
 			string = workers.get()
 			if string.find('Goodbye') > 0:
 				pid, string = string.split(' ', 1)
@@ -1039,14 +1143,22 @@ class Build:
 		for i in range(len(o)):
 			if o[i].r != documents[i]:
 				err = err + 1
-				pprint(color.RED+o[i].table+' parsed value: '+str(o[i].r)+', database value: '+str(documents[i])+color.END)
+				pprint('  ■ '+color.RED+o[i].table+' Parsed: '+'{:,}'.format(o[i].r)+', Stored: '+'{:,}'.format(documents[i])+color.END)
 		if err > 0:
+			appnd = appnd + 1
 			return self.extract(date)
+		bstats('Cleaning up', len(o), 0)
+		fName = '/tmp/'+filelist[selected][7:-7]+'--%s.json'
+		for idx in range(len(o)):
+			o[idx].dataFile = fName % o[idx].table
+			o[idx].close()
+			bstats('Cleaning up', len(o), idx+1)
+		bstats('Cleaning up', len(o), len(o), True)
 		return True
 
 	def book(self, date: str) -> None:
-		global IO, err
-		(table,IO,err) = ('MESSAGE',0,0)
+		global inputOutput, err
+		(table,inputOutput,err) = ('MESSAGE',0,0)
 		if Db.getInstance().list_collection_names(filter={'name':table+'_'+date}) == []:
 			return
 		query, projection = getQuery.new_order_extended()
@@ -1081,7 +1193,7 @@ class Build:
 		if docs > 0:
 			for d in q:
 				n = n + 1
-				bstats(docs, n)
+				bstats('Building order book', docs, n)
 				order = d.copy()
 				(ClOrdID,edocs,rm) = ([order['ClOrdID']],1,[])
 				for OrdID in ClOrdID:
@@ -1114,7 +1226,7 @@ class Build:
 					pprint(color.YELLOW + 'Update:', {'_id':order['_id']}, json.dumps(v, indent=4, sort_keys=True), color.END)
 					pprint(color.YELLOW + 'Delete:', json.dumps({'_id':{'$in':rm}}, indent=4, sort_keys=True), color.END)
 					err = err + 1
-		bstats(docs, n, True)
+		bstats('Building order book', docs, n, True)
 
 	def analyze(self, date: str) -> None:
 		self.book(date)
@@ -1124,9 +1236,9 @@ class Build:
 
 if __name__ == '__main__':
 	def run() -> None:
-		global db_Pass, filelist, selected, IO
+		global db_Pass, filelist, selected, inputOutput
 
-		IO = 0
+		inputOutput = 0
 		if len(db_User) > 0 and len(db_Pass) == 0:
 			_db_Pass = os.environ.get('db_Pass')
 			while True:
@@ -1155,7 +1267,6 @@ if __name__ == '__main__':
 		raise SystemExit
 	run()			
 
-	ppid = os.getpid()
 	for process in psutil.process_iter():
 		_ppid = process.ppid()
 		if _ppid == ppid:
