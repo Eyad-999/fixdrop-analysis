@@ -7,17 +7,23 @@ from __future__ import annotations
 from multiprocessing import Process, cpu_count
 from typing import Any
 from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
 from pymemcache.client.base import Client
+from pymemcache.client.retrying import RetryingClient
+from pymemcache.exceptions import MemcacheUnexpectedCloseError
 
 import os, sys, re, subprocess, signal
 import gzip, json, math
 import zmq, random, time, datetime
-import base64, psutil
+import base64, hashlib, psutil
 import pytz, pathlib, shlex
 
 db_Host = 'mongodb.example.com'
 db_User = 'admin'
 db_Pass = '' # Leave blank for user input
+db_Use_SRV = False
+
+AWS_Lambda = ''
 
 assert sys.version_info >= (3, 10)
 (filelist,selected) = ({0:False},0)
@@ -251,9 +257,15 @@ class Db:
 			raise Exception("This class is a singleton!")
 		else:
 			if len(str(db_User)) > 0:
-				Db.__instance = MongoClient("mongodb://"+db_User+":"+db_Pass+"@"+db_Host+":27017/")
+				if db_Use_SRV:
+					Db.__instance = MongoClient("mongodb+srv://"+db_User+":"+db_Pass+"@"+db_Host+"/")
+				else:
+					Db.__instance = MongoClient("mongodb://"+db_User+":"+db_Pass+"@"+db_Host+":27017/")
 			else:
-				Db.__instance = MongoClient("mongodb://"+db_Host+":27017/")
+				if db_Use_SRV:
+					Db.__instance = MongoClient("mongodb+srv://"+db_Host+"/")
+				else:
+					Db.__instance = MongoClient("mongodb://"+db_Host+":27017/")
 	@staticmethod
 	def disconnect():
 		if Db.__instance != None:
@@ -617,13 +629,11 @@ class Forwarder:
 		self.socket = self.context.socket(zmq.SUB)
 		self.socket.connect("tcp://localhost:%s" % port)
 		if self.f == self.p:
-			M.getInstance().delete('FP', True)
 			self.socket.setsockopt_string(zmq.SUBSCRIBE, 'P')
-			M.getInstance().set('FP', 0, 86400, False)
+			M.getInstance().set('FP', 0, 86400*7, False)
 		else:
-			M.getInstance().delete('F'+str(self.f), True)
 			self.socket.setsockopt_string(zmq.SUBSCRIBE, str(self.f))
-			M.getInstance().set('F'+str(self.f), 0, 86400, False)
+			M.getInstance().set('F'+str(self.f), 0, 86400*7, False)
 
 		self.io = Forwarder('server', self.p, 0)
 		self.io.server()
@@ -791,9 +801,9 @@ class Forwarder:
 								r['OrigClOrdID'] = False
 								r['TransactTime'] = unix_timestamp(order['TransactTime'])
 								r['ExecType'] = FIX44.exec_type(FIX['150'])
-							elif v in ['Client Cancel']:
+							elif v in ['Client Cancel', 'Instrument halted', 'Order Fill', 'IOC Order']:
 								r['CloseTime'] = unix_timestamp(order['TransactTime'])
-							elif v in ['Order Fill','Partial Fill']:
+							if v in ['Order Fill','Partial Fill']:
 								r['ExecuteTime'] = unix_timestamp(order['TransactTime'])
 						case '150':
 							order['ExecType'] = FIX44.exec_type(v)
@@ -1082,7 +1092,27 @@ class Build:
 					M.getInstance().set('F0', 0, 86400)
 			return num
 
+		def balance() -> int:
+			(min,topic,p) = (math.floor(time.time()),1,True)
+			if M.getInstance().get('queueSet') == None:
+				M.getInstance().set('queueSet', True, 60, True)
+			else:
+				p = False
+			for _topic in list(range(1,threads+1)):
+				if p == True:
+					q = int(M.getInstance().get('F'+str(_topic), 0))
+					queue[_topic] = q
+				else:
+					q = queue[_topic]
+				if q < min:
+					(min,topic) = (q,_topic)
+			queue[topic] = queue[topic] + 1
+			return topic
+
 		(workers,n,inputOutput) = (Worker.fork('orders_trades'),0,0)
+
+		queue = {}
+		M.getInstance().delete('queueSet')
 		with gzip.open(self.filelist[self.selected], 'rb') as fp:
 			for buffer in fp:
 				if timeStamp != str(time.time()).split('.',1)[0]:
@@ -1103,7 +1133,7 @@ class Build:
 
 					for i in range(len(o)):
 						if forTable(o[i].table, utf8_in) == True:
-							workers.io.send(base64.b64encode(utf8_in.encode('utf-8')).decode())
+							workers.io.send(base64.b64encode(utf8_in.encode('utf-8')).decode(), balance())
 							break
 
 		(decr,s) = (0,'')
