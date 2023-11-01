@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 # In a perfect world...
-#import pyjion; pyjion.enable()
+import pyjion; pyjion.enable()
 
 from __future__ import annotations
 from multiprocessing import Process, cpu_count
